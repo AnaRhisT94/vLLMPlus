@@ -491,9 +491,9 @@ def main():
     parser.add_argument('--results_filename', type=str, default='log')
     parser.add_argument('--port', type=int, required=True)
 
-    parser.add_argument('--random_prompt_lens_mean', type=int)
-    parser.add_argument('--random_prompt_lens_range', type=int)
-    parser.add_argument('--random_prompt_count', type=int)
+    parser.add_argument('--random_prompt_lens_mean', type=int, default=10)
+    parser.add_argument('--random_prompt_lens_range', type=int, default=10)
+    parser.add_argument('--random_prompt_count', type=int, default=2)
 
     parser.add_argument(
         '--distribution', choices=["burst", "uniform", "poisson"], default="burst")
@@ -504,14 +504,14 @@ def main():
     parser.add_argument('--fail_on_response_failure', action="store_true",
                         help="Whether or not to fail the benchmarking script if any request fails")
 
-    parser.add_argument('--variable_response_lens_mean', type=int)
-    parser.add_argument('--variable_response_lens_range', type=int)
+    parser.add_argument('--variable_response_lens_mean', type=int, default=10)
+    parser.add_argument('--variable_response_lens_range', type=int, default=10)
     parser.add_argument('--variable_response_lens_distribution', choices=[
                         "uniform", "exponential", "capped_exponential"], default="uniform")
 
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--prompts_filename', type=str)
-    group.add_argument('--gen_random_prompts', action='store_true')
+    # group = parser.add_mutually_exclusive_group(required=True)
+    # group.add_argument('--prompts_filename', type=str)
+    # group.add_argument('--gen_random_prompts', action='store_true')
 
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--allow_variable_generation_length',
@@ -523,28 +523,28 @@ def main():
 
     args = parser.parse_args()
 
-    if args.gen_random_prompts:
-        assert args.random_prompt_count is not None
+    # if args.gen_random_prompts:
+    #     assert args.random_prompt_count is not None
 
     backend = GenerationBackend[args.backend]
     tokenizer = AutoTokenizer.from_pretrained('facebook/opt-13b')
 
-    if args.prompts_filename:
-        prompts = load_prompts(args.prompts_filename)
-        prompt_lens = itertools.repeat(-1)
-        num_prompts = len(prompts)
-    elif args.gen_random_prompts:
-        num_prompts = args.random_prompt_count
-        random.seed(0xCADE)
-        prompts, prompt_lens = gen_random_prompts_return_lens(
-            tokenizer,
-            len_mean=args.random_prompt_lens_mean,
-            len_range=args.random_prompt_lens_range,
-            num_prompts=num_prompts,
-            vocab_ids_to_exclude=tokenizer.all_special_ids,
+    # if args.prompts_filename:
+    #     prompts = load_prompts(args.prompts_filename)
+    #     prompt_lens = itertools.repeat(-1)
+    #     num_prompts = len(prompts)
+    # elif args.gen_random_prompts:
+    num_prompts = args.random_prompt_count
+    random.seed(0xCADE)
+    prompts, prompt_lens = gen_random_prompts_return_lens(
+        tokenizer,
+        len_mean=args.random_prompt_lens_mean,
+        len_range=args.random_prompt_lens_range,
+        num_prompts=num_prompts,
+        vocab_ids_to_exclude=tokenizer.all_special_ids,
         )
-    else:
-        raise ValueError("unknown prompts")
+    # else:
+    #     raise ValueError("unknown prompts")
 
     if args.allow_variable_generation_length:
         response_lens = gen_random_response_lens(
@@ -574,7 +574,7 @@ def main():
         for i, (prompt_len, gen_len) in enumerate(zip(prompt_lens, response_lens)):
             totals.append(prompt_len + gen_len)
 
-        print('total tokens', list(sorted(totals)))
+        print('total tokens', list(totals))
 
     prompts = list(zip(prompts, prompt_lens, response_lens))
 
