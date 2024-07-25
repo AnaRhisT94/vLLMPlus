@@ -21,9 +21,16 @@ from vllm.utils import FlexibleArgumentParser
 os.environ['HF_HOME'] = '/home/ilan/.cache/huggingface/hub/'
 # assert 'CUDA_VISIBLE_DEVICES' in os.environ, "Set CUDA_VISIBLE_DEVICES, else this will take memory on each (and load model to 0)"
 import torch
+from typing import Annotated
+from fastapi import FastAPI, Form
 
 app = FastAPI()
 
+from pydantic import BaseModel
+class Item(BaseModel):
+    inputs: List[str] = ['Hello world']
+    parameters: Dict[str, int] = {'reponse_len': 10,
+                                  }
 
 @dataclass
 class GenerationInputs:
@@ -80,6 +87,19 @@ class ModelThread:
     def _thread(self):
         """
         The main thread function for running the VLLM model.
+        The step method works as follows:
+
+        1.) It schedules the sequences to be executed in the next iteration and the token blocks to be swapped in/out/copy.
+            Sequences may be preempted or reordered based on the scheduling policy.
+
+        2.) It calls the distributed executor to execute the model.
+
+        3.) It processes the model output, which includes decoding the relevant outputs, updating the scheduled sequence groups with model outputs
+            based on its sampling parameters, and freeing the finished sequence groups.
+
+        4.) Finally, it creates and returns the newly generated results.
+
+        The step method also handles logging of stats and tracing, and it stops the execution loop in parallel workers if there are no more unfinished requests.
         """
         server = self.init_model(self.vllm_args)
         # tokenizer = AutoTokenizer.from_pretrained(self.model_name)
@@ -92,13 +112,13 @@ class ModelThread:
             gen_inputs = []
             while not self.input_queue.empty():
                 gen_input = self.input_queue.get_nowait()
-
-                prompt = gen_input.prompt
+                reponse_len = gen_input.sampling_config['response_len']
+                prompt = {'prompt': gen_input.prompt}
                 sampling_params = SamplingParams(
                     n=1,
                     # yeah, typo
                     max_tokens=max(
-                        gen_input.sampling_config['reponse_len'], 1),
+                        reponse_len, 1),
                     ignore_eos=True,
                 )
                 req_id = gen_input.req_id
@@ -203,6 +223,13 @@ class FastAPIServer:
         return self.progress()
 
     def progress(self):
+        '''
+        The progress method is responsible for sending requests from the request queue to the model and receiving the generated outputs from the model.
+        It first iterates over each request in the request queue, retrieves the corresponding prompt and configuration, packages these into a GenerationInputs object,
+        and puts this object into the model's input queue. It then empties the request queue and checks the model's output queue for any generated outputs,
+        appending any found outputs to a list. 
+        Finally, it updates the generations dictionary with the generated outputs and sets the corresponding ready_event for each output.
+        '''
         sent_to_model = 0
         recv_from_model = 0
 
@@ -236,6 +263,11 @@ class FastAPIServer:
         return self.model_ready_event.is_set()
 
     def add_request(self, prompt, sampling_config):
+        '''
+        The add_request method adds a new request to the request queue and the requests dictionary.
+        It also creates a new asyncio.Event instance, which is used to signal when the generation for this request is complete,
+        and adds a new entry to the generations dictionary.
+        '''
         req_id = self.next_req_id
         self.requests[req_id] = (prompt, sampling_config)
         self.request_queue.append(req_id)
@@ -245,6 +277,12 @@ class FastAPIServer:
         return req_id
 
     async def get_generation(self, req_id):
+        '''
+        The get_generation method is an asynchronous method that waits for the ready_event of a specific request to be set,
+        indicating that the generation is complete. It then retrieves the generated text, the number of output tokens,
+        and any error that occurred during generation.
+        It also cleans up by deleting the entries for this request from the generations and requests dictionaries.
+        '''
         ready_event, _, _, _ = self.generations[req_id]
         await ready_event.wait()
         _, generation, num_output_tokens, error = self.generations[req_id]
@@ -253,15 +291,23 @@ class FastAPIServer:
         del self.requests[req_id]
         return generation, num_output_tokens, error
 
-    async def generate(self, request_dict: Dict):
-        prompt = request_dict['inputs']
-        sampling_config = request_dict['parameters']
-
+    async def generate(self, item: Item):
+        '''
+        The generate method is another asynchronous method that takes a dictionary containing the inputs and parameters for a generation request.
+        It adds the request, triggers the progress method to process requests, and waits for the generation to complete.
+        It then checks that the number of output tokens matches the expected response length and returns a dictionary containing the generated text,
+        the number of output tokens, and any error that occurred.
+        '''
+        prompt = item['inputs']
+        sampling_config = item['parameters']
+        print(f"Prompt: {prompt}")
+        print(f"sampling_config: {sampling_config}")
+        
         req_id = self.add_request(prompt, sampling_config)
         self.progress()
         generation, num_output_tokens, error = await self.get_generation(req_id)
 
-        expected_resp_len = sampling_config['reponse_len']
+        expected_resp_len = sampling_config['response_len']
         # print(f'generate check_len: {num_output_tokens=} {expected_resp_len=}')
         assert max(expected_resp_len, 1) == max(num_output_tokens,
                                                 1), f"{expected_resp_len=} {num_output_tokens=}"
@@ -272,11 +318,10 @@ class FastAPIServer:
             'error': error,
         }
 
-
+        
 @app.post("/generate")
-async def generate_stream(request: Request):
-    request_dict = await request.json()
-    return await server.generate(request_dict)
+async def generate_stream(dict: Dict):
+    return await server.generate(dict)
 
 
 @app.get("/is_ready")

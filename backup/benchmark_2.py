@@ -3,6 +3,7 @@
 import math
 from enum import Enum
 from transformers import AutoTokenizer
+from typing import List
 import aiohttp
 import argparse
 import asyncio
@@ -14,13 +15,8 @@ import requests
 import sys
 import time
 import numpy as np
-from pydantic import BaseModel
-from typing import List, Dict
 
-class Item(BaseModel):
-    inputs: str = 'Hello world'
-    parameters: Dict[str, int]=  {'response_len': 10}
-    
+
 def get_wait_time(mean_time_between_requests: float, distribution: str) -> float:
     if distribution == "uniform":
         return mean_time_between_requests
@@ -51,21 +47,163 @@ async def async_request_gen(generator, qps: float, distribution="uniform"):
 
 
 class GenerationBackend(str, Enum):
+    HfTextGenerationInference = "HfTextGenerationInference"
     vLLM = "vLLM"
+    NaiveHfPipeline = "NaiveHfPipeline"
+    RayGen = "RayGen"
+    FasterTransformer = "FasterTransformer"
 
 
-async def query_model_vllm(prompt, verbose, tokenizer, allow_variable_generation_length, total_requests, port):
-    prompt, expected_response_len = prompt
+async def query_model_hf(prompt, verbose, tokenizer, allow_variable_generation_length, total_requests, port):
+    prompt, prompt_len, response_len = prompt
+
+    timeout = aiohttp.ClientTimeout(total=60*60)
+
+    response_len = max(response_len, 1)
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        generate_input = dict(
+            inputs=prompt,
+            parameters=dict(
+                max_new_tokens=response_len,
+            ),
+        )
+
+        if verbose:
+            print('Querying model')
+        async with session.post(f'http://localhost:{port}/generate', json=generate_input) as resp:
+            if verbose:
+                print('Done')
+
+            output = await resp.json()
+            output['response_len'] = response_len
+            if verbose and 'generated_text' in output:
+                print(json.dumps(output['generated_text']))
+
+            return (prompt, output)
+
+
+async def query_model_naive_hf(prompt, verbose, tokenizer, allow_variable_generation_length, total_requests, port):
+    prompt, prompt_len, response_len = prompt
+
+    timeout = aiohttp.ClientTimeout(total=6*60*60)
+
+    bs = int(os.environ.get('NAIVE_HF_BS'))
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        generate_input = dict(
+            total_benchmark_requests=total_requests,
+            inputs=prompt,
+            parameters=dict(
+                batch_size=bs,
+                max_length=response_len + prompt_len,
+                prompt_len=prompt_len,
+                allow_variable_generation_length=allow_variable_generation_length,
+                reponse_len=response_len,
+            ),
+        )
+
+        if verbose:
+            print('Querying model')
+        async with session.post(f'http://localhost:{port}/generate', json=generate_input) as resp:
+            if verbose:
+                print('Done')
+
+            output = await resp.json()
+            if verbose and 'generated_text' in output:
+                print(json.dumps(output['generated_text']))
+
+            output['naive_hf_lens'] = (prompt_len, response_len)
+            output['response_len'] = response_len
+
+            return (prompt, output)
+
+
+async def query_model_ray(prompt, verbose, tokenizer, allow_variable_generation_length, total_requests, port):
+    prompt, prompt_len, response_len = prompt
+
+    timeout = aiohttp.ClientTimeout(total=60*60)
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        generate_input = dict(
+            total_benchmark_requests=total_requests,
+            inputs=prompt,
+            parameters=dict(
+                prompt_len=prompt_len,
+                reponse_len=response_len,
+            ),
+        )
+
+        if verbose:
+            print('Querying model')
+        async with session.post(f'http://localhost:{port}/generate', json=generate_input) as resp:
+            if verbose:
+                print('Done')
+
+            output = await resp.json()
+            output['response_len'] = response_len
+            if verbose and 'generated_text' in output:
+                print(json.dumps(output['generated_text']))
+            return (prompt, output)
+
+
+async def query_model_ft(prompt, verbose, tokenizer, allow_variable_generation_length, total_requests, port):
+    prompt, prompt_len, response_len = prompt
 
     timeout = aiohttp.ClientTimeout(total=4*60*60)
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        parameters = {'response_len': expected_response_len}
-        generate_input = Item(inputs=prompt, parameters=parameters)
+        generate_input = dict(
+            total_benchmark_requests=total_requests,
+            inputs=prompt,
+            parameters=dict(
+                prompt_len=prompt_len,
+                reponse_len=response_len,
+            ),
+        )
 
         if verbose:
             print('Querying model')
-        async with session.post(f'http://localhost:{port}/generate', json=generate_input.model_dump()) as resp:
+        async with session.post(f'http://localhost:{port}/generate', json=generate_input) as resp:
+            if verbose:
+                print('Done')
+
+            output = await resp.json()
+            output['response_len'] = response_len
+            if verbose and 'generated_text' in output:
+                print(json.dumps(output['generated_text']))
+
+            num_output_tokens = output["num_output_tokens"]
+            num_response_tokens_according_to_ft = num_output_tokens - prompt_len
+
+            print(
+                f'ft output comparison, {response_len=} {num_response_tokens_according_to_ft=}')
+
+            # FT returns with prompt. We remove it for accurate metrics.
+            if 'generated_text' in output:
+                output['generated_text'] = output['generated_text'][len(
+                    prompt):]
+
+            return (prompt, output)
+
+
+async def query_model_vllm(prompt, verbose, tokenizer, allow_variable_generation_length, total_requests, port):
+    prompt, prompt_len, expected_response_len = prompt
+
+    timeout = aiohttp.ClientTimeout(total=4*60*60)
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        generate_input = dict(
+            inputs=prompt,
+            parameters=dict(
+                prompt_len=prompt_len,
+                reponse_len=expected_response_len,
+            ),
+        )
+
+        if verbose:
+            print('Querying model')
+        async with session.post(f'http://localhost:{port}/generate', json=generate_input) as resp:
             if verbose:
                 print('Done')
 
@@ -113,8 +251,8 @@ def calculate_throughput(queries, dur_s, backend, tokenizer, median_token_latenc
         if 'response_len' in response:
             expected_response_lens.append(response['response_len'])
 
-    prompt_ids = [p for p in tokenizer.batch_encode_plus([prompt])['input_ids']]
-    response_ids = [r for r in tokenizer.batch_encode_plus(response)[
+    prompt_ids = [p for p in tokenizer.batch_encode_plus(prompts)['input_ids']]
+    response_ids = [r for r in tokenizer.batch_encode_plus(responses)[
         'input_ids']]
 
     print(
@@ -275,9 +413,9 @@ async def benchmark(
     median_token_latency = np.median(m._per_token_latencies)
     median_e2e_latency = np.median(m._latencies)
 
-    # calculate_throughput(queries, dur_s, backend, tokenizer, median_token_latency, median_e2e_latency,
-    #                      m._latencies, m._per_token_latencies, results_filename, log_latencies, fail_on_response_failure)
-    # calculate_cdf(m._latencies)
+    calculate_throughput(queries, dur_s, backend, tokenizer, median_token_latency, median_e2e_latency,
+                         m._latencies, m._per_token_latencies, results_filename, log_latencies, fail_on_response_failure)
+    calculate_cdf(m._latencies)
 
 
 def gen_random_response_lens(distribution: str, len_mean, len_range, num_prompts):
@@ -391,12 +529,45 @@ def main():
     num_prompts = args.random_prompt_count
     random.seed(0xCADE)
 
-    prompts = ["Hello, my name is "]
-    prompt_lens = [tokenizer.encode(prompts[0], return_tensors='pt').shape[1]]
-    response_lens = [10]
+    prompts, prompt_lens = gen_random_prompts_return_lens(
+            tokenizer,
+            len_mean=args.random_prompt_lens_mean,
+            len_range=args.random_prompt_lens_range,
+            num_prompts=num_prompts,
+            vocab_ids_to_exclude=tokenizer.all_special_ids,
+        )
 
+    if args.allow_variable_generation_length:
+        response_lens = gen_random_response_lens(
+            args.variable_response_lens_distribution, args.variable_response_lens_mean, args.variable_response_lens_range, num_prompts=num_prompts)
+        args.fixed_max_tokens = -1
+    else:
+        response_lens = [args.fixed_max_tokens for _ in range(num_prompts)]
 
-    prompts = list(zip(prompts, response_lens))
+    for i, (prompt_len, gen_len) in enumerate(zip(prompt_lens, response_lens)):
+        total = prompt_len + gen_len
+        if total > 2048:
+            print(f'truncating long prompt+gen_len {prompt_len=} {gen_len=}')
+            gen_len = 2048 - prompt_len
+        response_lens[i] = gen_len
+
+    if args.print_generation_lens_and_exit:
+        print(f'{prompt_lens=}')
+        print(f'{response_lens=}')
+        print('Exiting...')
+        return
+
+    if args.verbose or True:
+        print('prompt lens', prompt_lens)
+        print('response lens', response_lens)
+
+        totals = []
+        for i, (prompt_len, gen_len) in enumerate(zip(prompt_lens, response_lens)):
+            totals.append(prompt_len + gen_len)
+
+        print('total tokens', list(sorted(totals)))
+
+    prompts = list(zip(prompts, prompt_lens, response_lens))
 
     asyncio.run(benchmark(
         backend,

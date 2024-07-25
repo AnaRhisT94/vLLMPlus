@@ -15,11 +15,13 @@ from types import SimpleNamespace
 import subprocess
 import threading
 from dataclasses import dataclass
-from vllm import ServerArgs, LLMServer, SamplingParams
-import os
-os.environ["TRANSFORMERS_CACHE"] = '/data/cache'
+# from vllm import ServerArgs, LLMServer, SamplingParams
+from vllm import SamplingParams, EngineArgs, LLMEngine
+from vllm.utils import FlexibleArgumentParser
+# import os
+# os.environ["TRANSFORMERS_CACHE"] = '/data/cache'
 
-assert 'CUDA_VISIBLE_DEVICES' in os.environ, "Set CUDA_VISIBLE_DEVICES, else this will take memory on each (and load model to 0)"
+# assert 'CUDA_VISIBLE_DEVICES' in os.environ, "Set CUDA_VISIBLE_DEVICES, else this will take memory on each (and load model to 0)"
 
 
 app = FastAPI()
@@ -88,7 +90,7 @@ class ModelThread:
 
             needs_call_progress = False
             for vllm_output in vllm_outputs:
-                if not vllm_output.finished():
+                if not vllm_output.finished:
                     continue
 
                 needs_call_progress = True
@@ -110,9 +112,18 @@ class ModelThread:
 
     @staticmethod
     def init_model(vllm_args):
+        """
+        Initializes the VLLM model.
+
+        Args:
+            vllm_args (list): The arguments for initializing the VLLM model.
+
+        Returns:
+            LLMServer: The initialized VLLM server.
+        """
         print('Init model')
-        server_args = ServerArgs.from_cli_args(vllm_args)
-        server = LLMServer.from_server_args(server_args)
+        engine_args = EngineArgs.from_cli_args(vllm_args)
+        server = LLMEngine.from_engine_args(engine_args)
         print('Model ready')
         return server
 
@@ -224,18 +235,24 @@ async def is_ready(request: Request):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--port', type=int, required=True)
-    ServerArgs.add_cli_args(parser)
+    # parser_fastapi = argparse.ArgumentParser()
+    # parser_fastapi.add_argument('--port', type=int, default=8081)
+    parser.add_argument('--gpu-memory-utilization', type=float, default=0.4)
+    parser.add_argument('--enforce-eager', action="store_true")
+    engine_parser = FlexibleArgumentParser(parser)
+    EngineArgs.add_cli_args(engine_parser)
+    engine_args = engine_parser.parse_args()
     args = parser.parse_args()
-
-    vllm_args = ServerArgs.from_cli_args(args)
-
+    # args_fastapi = parser_fastapi.parse_args()
+    
+    vllm_args = EngineArgs.from_cli_args(engine_args)
+    # vllm_args = None
     loop = asyncio.new_event_loop()
     server = FastAPIServer(loop, vllm_args)
 
     from uvicorn import Config, Server
     config = Config(app=app, loop=loop, host='localhost',
-                    port=args.port, log_level="info")
+                    port=8081, log_level="info")
     uvicorn_server = Server(config)
 
     loop.run_until_complete(uvicorn_server.serve())

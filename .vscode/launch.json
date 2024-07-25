@@ -1,0 +1,46 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Benchmark_throughput",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "benchmark_throughput.py",
+            "console": "integratedTerminal",
+            "args": "--backend vLLM --port 8081 --allow_variable_generation_length --verbose"
+        },
+        {
+            "name": "Launch vLLM;",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "launch_vllm.py",
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "/home/ilan/vLLMPlus",
+                "HF_HOME": "/data/models/huggingface",
+                "HF_HUB_CACHE": "/data/models/huggingface/hub",
+                "CUDA_VISIBLE_DEVICES": "0",
+            },
+            "args": "--enforce-eager --gpu-memory-utilization 0.4"
+        },
+        {
+            "name": "Benchmark_2",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "benchmark_2.py",
+            "console": "integratedTerminal",
+            "args": "--backend vLLM --port 8081 --allow_variable_generation_length --verbose"
+        },
+        {
+            "name": "Launch 2;",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "launch_2.py",
+            "console": "integratedTerminal",
+            "args": "--enforce-eager --gpu-memory-utilization 0.4"
+        }
+    ]
+}
